@@ -9,45 +9,47 @@ type CardId int
 
 const N = 52
 
+func maxIntIndex(ints []int) int {
+	index := 0
+	for i := 0; i < len(ints); i++ {
+		if ints[i] > ints[index] {
+			index = i
+		}
+	}
+
+	return index
+}
+
 type Cards struct {
 	kinds   [N]int
 	values  [N]int
 	symbols [N]string
 }
 
-func (c *Cards) kind(i CardId) int {
-	return c.kinds[i]
-}
-
-func (c *Cards) symbol(i CardId) string {
-	return c.symbols[i]
-}
-
-func (c *Cards) value(i CardId) int {
-	return c.values[i]
+type PlayedCard struct {
+	playerName string
+	card       CardId
 }
 
 type GameState int
 
 const (
-	GsNone     = GameState(0)
+	GsDealing  = GameState(0)
 	GsPlanning = GameState(1)
 	GsPlaying  = GameState(2)
 	GsFinished = GameState(3)
 )
 
 type Game struct {
-	state         GameState
-	players       []string
-	hands         map[string][]CardId
-	activePlayer  int
-	playerByOrder []int
-	roundsLeft    uint
-	cardsPerHand  uint
-	estimatedWins []uint
-	totalWins     uint
-	started       bool
-	deck          []CardId
+	players            *Players
+	state              GameState
+	estimatedWinsCount int
+	playedCards        []PlayedCard
+	roundsLeft         uint
+	cardsPerHand       uint
+	totalEstimatedWins uint
+	started            bool
+	deck               []CardId
 }
 
 func NewGame(players []string) *Game {
@@ -56,14 +58,11 @@ func NewGame(players []string) *Game {
 	}
 
 	game := &Game{
-		players:       players,
-		deck:          make([]CardId, N),
-		estimatedWins: make([]uint, 0),
-		playerByOrder: make([]int, len(players)),
+		players: NewPlayers(players),
+		deck:    make([]CardId, N),
+		state:   GsDealing,
 	}
-	for i := 0; i < len(players); i++ {
-		game.playerByOrder[i] = i
-	}
+
 	for i := 0; i < N; i++ {
 		game.deck[i] = CardId(i)
 	}
@@ -76,9 +75,9 @@ func NewGame(players []string) *Game {
 }
 
 func (g *Game) init() {
-	g.roundsLeft = N / uint(len(g.players))
+	g.roundsLeft = N / uint(g.players.Len())
 	g.started = false
-	g.activePlayer = 1
+	g.players.active = g.players.dealer
 }
 
 func (g *Game) shufflePlayers() {
@@ -93,26 +92,26 @@ func (g *Game) shuffleDeck() {
 }
 
 func (g *Game) DealCards() {
-	if g.roundsLeft == 0 {
-		g.state = GsFinished
-	}
 	if g.started {
 		g.roundsLeft--
+		g.players.Next()
 	} else {
 		g.started = true
 	}
-	g.totalWins = 0
+
+	g.totalEstimatedWins = 0
 	g.cardsPerHand = g.roundsLeft
+	g.estimatedWinsCount = 0
+
+	g.shuffleDeck()
+	for i := 0; i < g.players.Len(); i++ {
+		hand := g.deck[(uint(i) * g.cardsPerHand):(uint(i+1) * g.cardsPerHand)]
+		g.players.At(i).hand = hand
+	}
+
+	g.players.active = g.players.dealer
+	g.playedCards = make([]PlayedCard, 0)
 	g.state = GsPlanning
-
-}
-
-func (g *Game) IsPlanningPhase() bool {
-	return g.state == GsPlanning
-}
-
-func (g *Game) ActivePlayer() int {
-	return 0
 }
 
 func (g *Game) Plan(estimatedWins uint) bool {
@@ -120,29 +119,104 @@ func (g *Game) Plan(estimatedWins uint) bool {
 		return false
 	}
 
-	lastPlayer := g.activePlayer == len(g.players)-1
-	sumsUpToHand := g.totalWins+estimatedWins == g.cardsPerHand
+	lastPlayer := g.estimatedWinsCount == g.players.Len()-1
+	sumsUpToHand := g.totalEstimatedWins+estimatedWins == g.cardsPerHand
 	if lastPlayer && sumsUpToHand {
 		return false
 	}
 
-	g.totalWins += estimatedWins
-	g.activePlayer++
+	g.estimatedWinsCount++
+	g.players.Current().estimatedWins = estimatedWins
+	g.totalEstimatedWins += estimatedWins
+	g.players.Next()
+
+	if lastPlayer {
+		g.state = GsPlaying
+	}
 
 	return true
 }
 
-func (g *Game) IsPlayingPhase() bool {
-	return g.state == GsPlaying
+func (g *Game) finishTurn(cardsData *Cards) {
+	kind := cardsData.kinds[g.playedCards[0].card]
+	values := make([]int, 0)
+	valuesBy := make([]string, 0)
+
+	// only consider same kind cards
+	for i := 0; i < len(g.playedCards); i++ {
+		played := g.playedCards[i]
+		valuesBy = append(valuesBy, played.playerName)
+		if kind == cardsData.kinds[played.card] {
+			values = append(values, cardsData.values[played.card])
+		} else {
+			values = append(values, 0)
+		}
+	}
+
+	maxi := maxIntIndex(values)
+	winningPlayer := valuesBy[maxi]
+	g.players.Win(winningPlayer)
+	g.playedCards = make([]PlayedCard, 0)
 }
 
-func (g *Game) IsFinished() bool {
-	return g.state == GsFinished
+func (g *Game) finishRound() {
+	g.players.CalcRoundScores()
+	if g.roundsLeft == 1 {
+		g.state = GsFinished
+	} else {
+		g.state = GsDealing
+	}
 }
 
-func (g *Game) PlayCard(card int) bool {
+func (g *Game) PlayCardAt(cardsData *Cards, index int) bool {
+	hand := g.players.Current().hand
+
+	canPlayCard := false
+
+	// player is first
+	if len(g.playedCards) == 0 {
+		canPlayCard = true
+	} else {
+		// check if has given kind
+		allowedCardsIndexes := make([]int, 0)
+		for i := 0; i < len(hand); i++ {
+			if cardsData.kinds[hand[i]] == cardsData.kinds[g.playedCards[0].card] {
+				allowedCardsIndexes = append(allowedCardsIndexes, i)
+			}
+		}
+
+		// no given kind
+		if len(allowedCardsIndexes) == 0 {
+			canPlayCard = true
+		} else {
+			canPlayCard = intFind(allowedCardsIndexes, index) != -1
+		}
+	}
+
+	if !canPlayCard {
+		return false
+	}
+
+	card := hand[index]
+	begin := hand[0:index]
+	end := hand[index+1 : len(hand)]
+	hand = append(begin, end...)
+	g.players.Current().hand = hand
+
+	g.playedCards = append(g.playedCards, PlayedCard{g.players.Current().name, card})
+	g.players.Next()
+
+	if len(g.playedCards) == g.players.Len() {
+		g.finishTurn(cardsData)
+		if g.players.Current().HasEmptyHand() {
+			g.finishRound()
+		}
+	}
+
 	return true
 }
+
+//
 
 func main() {
 	cards := &Cards{
@@ -159,10 +233,10 @@ func main() {
 			2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
 		},
 		symbols: [N]string{
-			"♠️2", "♠️3", "♠️4", "♠️5", "♠️6", "♠7️", "♠️8", "♠️9", "♠️10", "♠️J", "♠️Q", "♠️K", "♠️A",
-			"♥️2", "♥️3", "♥️4", "♥️5", "♥️6", "♠7", "♥️8", "♥️9", "♥️10", "♥️J", "♥️Q", "♥️K", "♥️A",
+			"♠️2", "♠️3", "♠️4", "♠️5", "♠️6", "♠️7", "♠️8", "♠️9", "♠️10", "♠️J", "♠️Q", "♠️K", "♠️A",
+			"♥️2", "♥️3", "♥️4", "♥️5", "♥️6", "♥️7", "♥️8", "♥️9", "♥️10", "♥️J", "♥️Q", "♥️K", "♥️A",
 			"♣️2", "♣️3", "♣️4", "♣️5", "♣️6", "♣️7", "♣️8", "♣️9", "♣️10", "♣️J", "♣️Q", "♣️K", "♣️A",
-			"♦️2", "♦️3", "♦️4", "♦5", "♦️6", "♦️7", "♦️8", "♦️9", "♦️10", "♦️J", "♦️Q", "♦️K", "♦️A",
+			"♦️2", "♦️3", "♦️4", "♦️5", "♦️6", "♦️7", "♦️8", "♦️9", "♦️10", "♦️J", "♦️Q", "♦️K", "♦️A",
 		},
 	}
 
@@ -176,19 +250,33 @@ func main() {
 	})
 
 	for {
-		game.DealCards()
+		fmt.Println("===== dealing cards ====")
+		if game.state == GsDealing {
+			game.DealCards()
 
-		fmt.Print("Round left: ", game.roundsLeft, "\n")
-		for i := 0; i < len(game.players); i++ {
-			fmt.Print("P", i, ": ", game.players[i])
-			for j := 0; j < len(game.hands[game.players[i]]); j++ {
-				fmt.Print(cards.symbol(game.hands[game.players[i]][j]), ", ")
+			fmt.Print("Rounds left: ", game.roundsLeft, "\n")
+			for i := 0; i < game.players.Len(); i++ {
+				dealer := " "
+				if game.players.dealer == i {
+					dealer = "*"
+				}
+				fmt.Print("P", i, ": ", fmt.Sprintf("%10s%s: ", game.players.At(i).name, dealer))
+				for j := 0; j < len(game.players.At(i).hand); j++ {
+					fmt.Print(
+						fmt.Sprintf(
+							"%4s",
+							cards.symbols[game.players.At(i).hand[j]],
+						),
+						", ",
+					)
+				}
+				fmt.Print("\n")
 			}
-			fmt.Print("\n")
 		}
 
-		for game.IsPlanningPhase() {
-			fmt.Print("P: %d\n", game.ActivePlayer())
+		fmt.Println("===== planning phase ====")
+		for game.state == GsPlanning {
+			fmt.Print(fmt.Sprintf("%10s", game.players.Current().name), "> ")
 			var wins uint
 			_, err := fmt.Scanf("%d", &wins)
 			if err == nil {
@@ -200,16 +288,38 @@ func main() {
 				continue
 			}
 		}
-		for game.IsPlayingPhase() {
-			fmt.Print("P: %d\n", game.ActivePlayer())
-			card := 1
-			if !game.PlayCard(card) {
-				fmt.Println("Wrong card!")
+
+		fmt.Println("===== playing phase ====")
+		for game.state == GsPlaying {
+			fmt.Print(fmt.Sprintf("%10s", game.players.Current().name), ": ")
+			for i := 0; i < len(game.players.Current().hand); i++ {
+				fmt.Print(cards.symbols[game.players.Current().hand[i]], ", ")
+			}
+			fmt.Print("\n> ")
+			var card int
+			_, err := fmt.Scanf("%d", &card)
+			if err == nil {
+				fmt.Println("Selected: ", cards.symbols[game.players.Current().hand[card]])
+				if !game.PlayCardAt(cards, card) {
+					fmt.Println("Wrong card!")
+					continue
+				} else {
+					fmt.Print("Table: ")
+					for i := 0; i < len(game.playedCards); i++ {
+						fmt.Print(cards.symbols[game.playedCards[i].card], ", ")
+					}
+					fmt.Print("\n")
+				}
+			} else {
 				continue
 			}
 		}
-		if game.IsFinished() {
-			fmt.Println("End")
+
+		if game.state == GsFinished {
+			fmt.Println("===== scores =====")
+			for i := 0; i < game.players.Len(); i++ {
+				fmt.Print(fmt.Sprintf("%10s", game.players.At(i).name), ": ", game.players.At(i).points, "\n")
+			}
 			break
 		}
 	}
