@@ -74,7 +74,6 @@ func NewGame(players []string) *Game {
 
 func (g *Game) init() {
 	g.roundsLeft = N / uint(g.players.Len())
-	g.roundsLeft = 3
 	g.cardsPerHand = g.roundsLeft
 	g.started = false
 	g.players.active = g.players.dealer
