@@ -68,20 +68,24 @@ func NewGame(players []string) *Game {
 	}
 
 	game.init()
-	game.shufflePlayers()
-	game.shuffleDeck()
 
 	return game
 }
 
 func (g *Game) init() {
 	g.roundsLeft = N / uint(g.players.Len())
+	g.roundsLeft = 3
+	g.cardsPerHand = g.roundsLeft
 	g.started = false
 	g.players.active = g.players.dealer
 }
 
-func (g *Game) shufflePlayers() {
-
+func (g *Game) dealCards() {
+	g.shuffleDeck()
+	for i := 0; i < g.players.Len(); i++ {
+		hand := g.deck[(uint(i) * g.cardsPerHand):(uint(i+1) * g.cardsPerHand)]
+		g.players.At(i).hand = hand
+	}
 }
 
 func (g *Game) shuffleDeck() {
@@ -94,20 +98,15 @@ func (g *Game) shuffleDeck() {
 func (g *Game) DealCards() {
 	if g.started {
 		g.roundsLeft--
+		g.cardsPerHand = g.roundsLeft
 		g.players.Next()
 	} else {
 		g.started = true
 	}
+	g.dealCards()
 
 	g.totalEstimatedWins = 0
-	g.cardsPerHand = g.roundsLeft
 	g.estimatedWinsCount = 0
-
-	g.shuffleDeck()
-	for i := 0; i < g.players.Len(); i++ {
-		hand := g.deck[(uint(i) * g.cardsPerHand):(uint(i+1) * g.cardsPerHand)]
-		g.players.At(i).hand = hand
-	}
 
 	g.players.active = g.players.dealer
 	g.playedCards = make([]PlayedCard, 0)
@@ -198,8 +197,8 @@ func (g *Game) PlayCardAt(cardsData *Cards, index int) bool {
 	}
 
 	card := hand[index]
-	begin := hand[0:index]
-	end := hand[index+1 : len(hand)]
+	begin := hand[:index]
+	end := hand[index+1:]
 	hand = append(begin, end...)
 	g.players.Current().hand = hand
 
